@@ -1,5 +1,4 @@
 #include <string.h>
-#include <libnet.h>
 #include <stdbool.h>
 
 #include <stdio.h>
@@ -15,10 +14,47 @@
 char *blocked_url;
 
 typedef struct result {
-	u_int32_t id;
+	int id;
 	bool blocked;
 } result;
 
+void dump(unsigned char* buf, int size) {
+	int i;
+	printf("\n");
+	for (i = 0; i < size; i++) {
+		if (i != 0 && i % 16 == 0)
+			printf("\n");
+		printf("%02X ", buf[i]);
+	}
+	printf("\n");
+}
+
+bool match(int blocked_l, int host_l, unsigned char *host){
+	// original logic
+	/*
+	if (blocked_l == host_l && strncmp(blocked_url, host, blocked_l) == 0){
+		return true;
+	}
+	return false;
+	*/
+	
+	// new logic
+	
+	for(int i = 0; i <= host_l; i++){
+		if (i == host_l || host[host_l - i - 1] == '.'){
+			unsigned char *host_chk = &host[host_l - i];
+			// if host is abc.def.qwe.rty
+			// it iterates [rty, qwe.rty, def.qwe.rty, abc.def.qwe.rty]
+			// this way, we can block "something.test.gilgil.net" with block keyword "test.gilgil.net" which should be blocked,
+			// and pass through something like "nottest.gilgil.net" which shouldn't be blocked
+			
+			if (i == blocked_l && strncmp(blocked_url, (const char*)host_chk, blocked_l) == 0)
+				return true;
+		}
+	}
+	
+	return false;
+}
 
 /* returns true if packet is blocked */
 static result print_pkt (struct nfq_data *tb)
@@ -54,8 +90,8 @@ static result print_pkt (struct nfq_data *tb)
 
 	ifi = nfq_get_indev(tb);
 	if (ifi)
-		printf("indev=%u ", ifi);
-
+ 		printf("indev=%u ", ifi);
+ 		
 	ifi = nfq_get_outdev(tb);
 	if (ifi)
 		printf("outdev=%u ", ifi);
@@ -74,17 +110,32 @@ static result print_pkt (struct nfq_data *tb)
 	if (ret >= 0){
 		printf("payload_len=%d ", ret);
 		
-		int l = strlen(blocked_url);
+		// dump(data, ret);
 		
-		for(int i = 0; i < ret - 6 - l; i++){
-			if (strncmp("Host: ", &data[i], 6) == 0 && strncmp(blocked_url, &data[i + 6], l) == 0){
-				printf("Packet id: %d blocked.\n", id);
-				res.blocked = true;
+		int blocked_l = strlen(blocked_url);
+		unsigned char *host = NULL;
+		
+		for(int i = 0; i < ret - 6 - blocked_l; i++){
+			if (strncmp("Host: ", (const char*)&data[i], 6) == 0){
+				host = &data[i + 6];
 				break;
 			}
 		}
 		
-		res.blocked = false;
+		if (host != NULL){
+			int host_l = 0;
+			for(int j = 0; j < ret - 2; j++){
+				if (strncmp("\r\n", (const char*)&host[j], 2) == 0){
+					host_l = j;
+					break;
+				}
+			}
+			
+			if (match(blocked_l, host_l, host)){
+				printf("\nPacket id: %d BLOCKED. ", id);
+				res.blocked = true;
+			}
+		}
 	}
 
 	return res;
@@ -107,6 +158,11 @@ int main(int argc, char **argv)
 	}
 	blocked_url = argv[1];
 	
+	system("sudo iptables -F");
+	system("sudo iptables -A OUTPUT -j NFQUEUE --queue-num 0");
+	system("sudo iptables -A INPUT -j NFQUEUE --queue-num 0");
+
+
 	struct nfq_handle *h;
 	struct nfq_q_handle *qh;
 	struct nfnl_handle *nh;
